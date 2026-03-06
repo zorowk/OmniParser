@@ -4,10 +4,12 @@ python -m omniparserserver --som_model_path ../../weights/icon_detect/model.pt -
 
 import argparse
 import base64
+import json
 import logging
 import os
 import sys
 import time
+from pathlib import PurePosixPath
 from typing import Optional
 
 import boto3
@@ -91,32 +93,55 @@ def _parse_s3_uri(s3_uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-def _upload_base64_image_to_s3(image_base64: str, s3_output_path: str) -> str:
-    """Decode a base64 PNG and upload it to S3. Returns the s3:// URI."""
-    bucket, key = _parse_s3_uri(s3_output_path)
-    image_bytes = base64.b64decode(image_base64)
+def _upload_bytes_to_s3(data: bytes, s3_uri: str, content_type: str) -> str:
+    """Upload raw bytes to S3. Returns the s3:// URI."""
+    bucket, key = _parse_s3_uri(s3_uri)
     get_s3_client().put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=image_bytes,
-        ContentType="image/png",
+        Bucket=bucket, Key=key, Body=data, ContentType=content_type
     )
-    logger.info("uploaded SOM image to %s", s3_output_path)
-    return s3_output_path
+    logger.info("uploaded %s to %s", content_type, s3_uri)
+    return s3_uri
 
 
-def _run_parse(image_base64: str, s3_output_path: Optional[str] = None) -> dict:
+def _build_s3_sub_path(s3_output_dir: str, *parts: str) -> str:
+    """Join an s3:// directory URI with sub-path parts (e.g. 'som_images', 'img.png')."""
+    base = s3_output_dir.rstrip("/")
+    return base + "/" + "/".join(parts)
+
+
+def _run_parse(
+    image_base64: str,
+    s3_output_path: Optional[str] = None,
+    image_name: Optional[str] = None,
+) -> dict:
     start = time.time()
     som_image_base64, parsed_content_list = omniparser.parse(image_base64)
 
-    result: dict = {"parsed_content_list": parsed_content_list}
-
     if s3_output_path:
-        result["som_image_s3_path"] = _upload_base64_image_to_s3(
-            som_image_base64, s3_output_path
+        name = image_name or "image.png"
+        stem = PurePosixPath(name).stem
+
+        som_uri = _build_s3_sub_path(s3_output_path, "som_images", name)
+        som_image_s3_path = _upload_bytes_to_s3(
+            base64.b64decode(som_image_base64), som_uri, "image/png"
         )
+        parsed_uri = _build_s3_sub_path(
+            s3_output_path, "parsed_contents", f"{stem}.json"
+        )
+        parsed_content_s3_path = _upload_bytes_to_s3(
+            json.dumps(parsed_content_list, indent=2).encode("utf-8"),
+            parsed_uri,
+            "application/json",
+        )
+        result: dict = {
+            "parsed_content_s3_path": parsed_content_s3_path,
+            "som_image_s3_path": som_image_s3_path,
+        }
     else:
-        result["som_image_base64"] = som_image_base64
+        result: dict = {
+            "parsed_content_list": parsed_content_list,
+            "som_image_base64": som_image_base64,
+        }
 
     result["latency"] = time.time() - start
     logger.info("parse completed in %.3fs", result["latency"])
@@ -142,6 +167,8 @@ async def parse(parse_request: ParseRequest):
             detail="Provide exactly one of base64_image or s3_path, not both.",
         )
 
+    image_name: Optional[str] = None
+
     if parse_request.base64_image:
         image_b64 = parse_request.base64_image
     elif parse_request.s3_path:
@@ -152,12 +179,13 @@ async def parse(parse_request: ParseRequest):
                 status_code=400, detail=f"Failed to download from S3: {e}"
             )
         image_b64 = _image_bytes_to_base64(image_bytes)
+        image_name = parse_request.s3_path.rsplit("/", 1)[-1]
     else:
         raise HTTPException(
             status_code=400, detail="Provide either base64_image or s3_path."
         )
 
-    return _run_parse(image_b64, parse_request.s3_output_path)
+    return _run_parse(image_b64, parse_request.s3_output_path, image_name=image_name)
 
 
 # ---------------------------------------------------------------------------
