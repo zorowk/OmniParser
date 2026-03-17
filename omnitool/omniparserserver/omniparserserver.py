@@ -134,6 +134,7 @@ def _run_parse(
             "application/json",
         )
         result: dict = {
+            "parsed_content_list": parsed_content_list,
             "parsed_content_s3_path": parsed_content_s3_path,
             "som_image_s3_path": som_image_s3_path,
         }
