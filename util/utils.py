@@ -19,9 +19,9 @@ import numpy as np
 from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
-reader = easyocr.Reader(['en'])
+reader = easyocr.Reader(['ch_sim','en'])
 paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
+    lang=os.environ['OCR_LANG'] if 'OCR_LANG' in os.environ else 'ch',
     use_angle_cls=False,
     use_gpu=False,  # using cuda will conflict with pytorch in the same process
     show_log=False,
